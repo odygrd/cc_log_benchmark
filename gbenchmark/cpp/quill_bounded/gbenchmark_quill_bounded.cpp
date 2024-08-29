@@ -5,12 +5,38 @@
 #include <mutex>
 #include "log_msg/log_msg.h"
 #include "gbenchmark/log_gbenchmark.h"
-#define QUILL_QUEUE_CAPACITY 4194304
-#include "quill/Quill.h"
+
+#include "quill/Backend.h"
+#include "quill/Frontend.h"
+#include "quill/LogMacros.h"
+#include "quill/sinks/FileSink.h"
+
+struct FrontendOptionsBounded
+{
+    static constexpr quill::QueueType queue_type = quill::QueueType::BoundedDropping;
+    static constexpr uint32_t initial_queue_capacity = 8 * 1024 * 1024;
+    static constexpr uint32_t blocking_queue_retry_interval_ns = 800;
+    static constexpr bool huge_pages_enabled = false;
+};
+
+using logger_t = quill::LoggerImpl<FrontendOptionsBounded>;
+using frontend_t = quill::FrontendImpl<FrontendOptionsBounded>;
 
 std::once_flag init_flag;
 
-quill::Logger *logger = nullptr;
+logger_t* logger = frontend_t::create_or_get_logger(
+        "file_logger", frontend_t::create_or_get_sink<quill::FileSink>(
+                "logs/gbenchmark_quill_bounded.log",
+                []()
+                {
+                    quill::FileSinkConfig cfg;
+                    cfg.set_open_mode('w');
+                    cfg.set_filename_append_option(quill::FilenameAppendOption::None);
+                    return cfg;
+                }(),
+                quill::FileEventNotifier{}),
+        quill::PatternFormatterOptions{"[%(log_level)]|[%(time)]|[%(file_name):%(line_number)]|[%(caller_function)]|[%(thread_id)] - %(message)",
+                                       "%H:%M:%S.%Qns", quill::Timezone::GmtTime});
 
 #define LOG_FUNC(num)                                                 \
 	void log_func##num(LogMsg &msg)                                   \
@@ -37,28 +63,8 @@ public:
 	{
 		std::call_once(init_flag, []() {
 			std::filesystem::create_directories("logs");
+			quill::Backend::start();
 
-			quill::configure([]() {
-				quill::Config cfg;
-				cfg.default_queue_capacity = 8 * 1024 * 1024;
-				return cfg;
-			}());
-			quill::start();
-
-			logger = quill::create_logger(
-				"file_logger",
-				quill::file_handler("logs/gbenchmark_quill_bounded.log", []() {
-					quill::FileHandlerConfig cfg;
-					cfg.set_open_mode('w');
-					cfg.set_pattern("[%(level_name)]|"
-									"[%(ascii_time)]|"
-									"[%(filename):%(lineno)]|"
-									"[%(function_name)]|"
-									"[%(thread)]"
-									" - %(message)",
-									"%H:%M:%S.%Qms");
-					return cfg;
-				}()));
 			logger->set_log_level(quill::LogLevel::TraceL3);
 			logger->init_backtrace(2u, quill::LogLevel::Critical);
 		});
